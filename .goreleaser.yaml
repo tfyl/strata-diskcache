@@ -1,0 +1,16 @@
+version: 2
+
+builds:
+  - main: ./cmd/strata-diskcache
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+
+archives:
+  - formats: [tar.gz]
+    files: [README.md, LICENSE, CHANGELOG.md, contrib/*]
+
+checksum:
+  name_template: checksums.txt

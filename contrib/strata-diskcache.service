@@ -1,0 +1,37 @@
+# Example unit. Strata listens on 127.0.0.1:8081 and saves session files to
+# /var/lib/strata/sessions (its slot_save_path); clients connect to :8080.
+# Run as the user Strata runs as, so the proxy can delete the files it writes.
+
+[Unit]
+Description=strata-diskcache (disk conversation cache for Strata)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=strata
+Group=strata
+Environment=LISTEN=:8080
+Environment=UPSTREAM=http://127.0.0.1:8081
+Environment=SESSION_DIR=/var/lib/strata/sessions
+Environment=MAX_GIB=40
+Environment=RETENTION_DAYS=7
+# Match Strata's --session-min-free-mib
+Environment=MIN_FREE_MIB=4096
+# stderr goes to the journal. To also keep rotated files:
+#Environment=LOG_OUTPUT=both
+#Environment=LOG_FILE=/var/log/strata-diskcache/strata-diskcache.log
+#LogsDirectory=strata-diskcache
+ExecStart=/usr/local/bin/strata-diskcache
+Restart=always
+RestartSec=2
+# a little over --shutdown-s (20 s), so a save under way can finish
+TimeoutStopSec=25
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,8 @@
 - The RAM cache parks a conversation when another comes in, evicting the oldest. It refuses one bigger than its
   budget or one that would leave less than its RAM floor.
 - Strata matches prompts by tokens, so a file of an earlier turn still saves everything up to that turn.
+- With `--lazy` / `idle_unload_s` the engine goes away when idle: `/metrics` reports no context and no KV type,
+  slot calls answer 503 `not loaded`, and a generation request loads it again.
 
 ## Policy
 
@@ -32,7 +34,10 @@ restore or a fresh read, never a wrong answer. That makes failing open safe.
 | Disk nearly full, or the cap too small | the oldest files go until a save fits under the cap and above the free-space floor; if it can't, no save | `TestDiskFloorWins`, `TestCapAndLRU` |
 | Overlapping requests (incl. one arriving mid-save or mid-restore) | passed through untouched; the live conversation is forgotten until a request runs alone | `TestOverlappingRequests`, `TestRequestDuringIdleSave` |
 | Client cancels mid-stream or mid-restore | the restore finishes and the file stays; a cut-off answer isn't trusted as live | `TestClientCancel` |
-| Strata restarted, its engine unloaded, or a 5xx | the RAM view and the live conversation reset; files still restore | `TestStrataRestartAndFingerprint` |
+| Strata restarted, its engine unloaded, or a 5xx | the RAM view and the live conversation reset; files still restore | `TestStrataRestartAndFingerprint`, `TestUnloadedEngineKeepsFiles` |
+| The engine is unloaded (`--lazy`, `idle_unload_s`) | `/metrics` of an unloaded engine is not read as a fingerprint, so the files stay; a restore refused with 503 `not loaded` wakes the engine with a 1-token request, checks its fingerprint, and retries the restore once; a refused wakeup or another fingerprint is reported as what it is; with no file to restore, the request passes through | `TestColdEngineWakesAndRestores`, `TestColdEngineNoFilePassesThrough`, `TestWokenEngineWithNewFingerprint`, `TestWakeupFailurePropagates` |
+| A file that restores far fewer tokens than its name claims | forgotten, so the conversation is saved afresh instead of being skipped as on disk | `TestTruncatedSessionFile` |
+| The client closes the socket after the stream's terminal event (`data: [DONE]` on its own line, a `finish_reason`, `message_stop`, `response.completed`) | a complete answer: the live conversation is kept and saved; the marker is searched in every chunk written, so a `response.completed` followed by kilobytes counts, and `[DONE]` quoted inside streamed content does not; a cancel while the stream runs is still a cancellation and is not trusted | `TestClientGoneAfterCompletion`, `TestClientCancel` |
 | Body over `--max-body-mib`, malformed JSON, other endpoints | passed through unbuffered or as they are; anything that may change Strata's state makes the live conversation unknown | `TestFailOpen` |
 | SIGTERM mid-save | requests and the save get `--shutdown-s`; Strata completes a save cut off later, and the next start indexes it | `TestShutdownMidSave` |
 | Prompt or answer text | never logged | `TestDialectsAndNoContentInLogs` |

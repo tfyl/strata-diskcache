@@ -127,6 +127,41 @@ func TestDiskFloorWins(t *testing.T) {
 	}
 }
 
+func TestAnyFingerprint(t *testing.T) {
+	s, dir, _ := newStore(t, 1<<30, 1<<40)
+	if s.AnyFingerprint() != "" {
+		t.Error("an empty store gave a fingerprint")
+	}
+	now := time.Now()
+	write(t, dir, FileName("aaaaaaaaaaaa", key(1), 20000), 10, now.Add(-2*time.Hour))
+	write(t, dir, FileName(fp, key(2), 20000), 10, now.Add(-time.Hour))
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.AnyFingerprint(); got != fp {
+		t.Errorf("AnyFingerprint = %q, want the most recently used file's", got)
+	}
+	s.Touch(Entry{Fingerprint: "aaaaaaaaaaaa", Key: key(1), Tokens: 20000})
+	if got := s.AnyFingerprint(); got != "aaaaaaaaaaaa" {
+		t.Errorf("After a Touch, AnyFingerprint = %q, want the file just used", got)
+	}
+}
+
+func TestAnyFingerprintTie(t *testing.T) {
+	s, dir, _ := newStore(t, 1<<30, 1<<40)
+	now := time.Now()
+	write(t, dir, FileName("aaaaaaaaaaaa", key(1), 20000), 10, now)
+	write(t, dir, FileName("bbbbbbbbbbbb", key(2), 20000), 10, now)
+	if err := s.Load(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ { // map order is randomised: the tie must break the same way
+		if got := s.AnyFingerprint(); got != "bbbbbbbbbbbb" {
+			t.Fatalf("AnyFingerprint = %q, want the higher file name for the same mtime", got)
+		}
+	}
+}
+
 func TestCommitLookupAndCorruptFiles(t *testing.T) {
 	s, dir, _ := newStore(t, 1<<30, 1<<40)
 	t1 := []string{key(1)}

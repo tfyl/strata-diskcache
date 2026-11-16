@@ -25,6 +25,20 @@
 - Any non-GET request outside the three generation endpoints makes the proxy forget the live conversation.
 - `/health` on the admin listener; golangci-lint in CI; `docs/design.md` with the edge cases and their tests.
 
+### Fixed
+
+- `/metrics` of an unloaded engine no longer reads as a fingerprint, so an unload no longer evicted the session
+  files of the engine that was loaded.
+- An engine unloaded by `--lazy` / `idle_unload_s` wakes for a restore: the proxy sends a 1-token request, checks
+  that the engine is still the one the file was written for, and retries the restore the engine refused. A failed
+  wakeup, or a woken engine with another fingerprint, is reported as what it is.
+- A client that closes the connection after the stream's terminal event counts as a complete answer: the
+  conversation stays live and is saved. The marker is looked for in the whole chunk, because Responses writes
+  kilobytes after `response.completed`, and `[DONE]` is anchored to its line, so the model quoting it in the
+  answer is not the end of the stream.
+- A session file that restores less than half the tokens its name claims is forgotten, so the conversation is
+  saved afresh instead of being skipped as already on disk.
+
 ## 0.1.0 (unreleased)
 
 - First version: pass-through proxy for Strata with an on-disk conversation cache. Saves while idle or when a

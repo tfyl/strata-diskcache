@@ -119,9 +119,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.remember(record{At: float64(time.Now().UnixMicro()) / 1e6, Path: r.URL.Path, Client: client,
 		UserAgent: r.UserAgent(), Action: t.action})
 
-	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	// tail starts with a newline so the first chunk can be seen as a line start
+	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, tail: []byte{'\n'}}
 	defer func() {
-		gone := r.Context().Err() != nil
+		gone := r.Context().Err() != nil && !sw.done
 		p.cache.finish(t, sw.status, gone)
 		// one line per request: what the cache decided, never what was said
 		p.log.Info("request", "path", r.URL.Path, "client", client, "action", t.action, "reason", t.reason,
@@ -136,7 +137,13 @@ type statusWriter struct {
 	http.ResponseWriter
 	status int
 	wrote  bool
+	done   bool   // the stream reached its terminal event
+	tail   []byte // the last bytes written, seeded with a newline at stream start
 }
+
+// tailKeep is what Write remembers across calls: enough to see a marker split
+// between two writes.
+const tailKeep = 64
 
 func (s *statusWriter) WriteHeader(code int) {
 	if !s.wrote && code >= 200 {
@@ -147,7 +154,40 @@ func (s *statusWriter) WriteHeader(code int) {
 
 func (s *statusWriter) Write(b []byte) (int, error) {
 	s.wrote = true
+	if !s.done && len(b) > 0 {
+		scanned := make([]byte, 0, len(s.tail)+len(b))
+		scanned = append(scanned, s.tail...)
+		scanned = append(scanned, b...)
+		for _, m := range doneMarkers {
+			if bytes.Contains(scanned, m) {
+				s.done = true
+				s.tail = nil
+				break
+			}
+		}
+		if !s.done {
+			if len(scanned) > tailKeep {
+				s.tail = append(s.tail[:0], scanned[len(scanned)-tailKeep:]...)
+			} else {
+				s.tail = scanned
+			}
+		}
+	}
 	return s.ResponseWriter.Write(b)
+}
+
+// doneMarkers are the events that close a stream in the three dialects; none of
+// them appears mid-stream. A marker is searched in the whole chunk, because the
+// Responses API writes kilobytes after "response.completed". [DONE] is anchored
+// to its line: inside JSON strings newlines are escaped, so a model quoting
+// "data: [DONE]" in streamed content is not the end of the stream.
+var doneMarkers = [][]byte{
+	[]byte("\ndata: [DONE]"),
+	[]byte(`"finish_reason":"stop"`), []byte(`"finish_reason": "stop"`),
+	[]byte(`"finish_reason":"tool_calls"`), []byte(`"finish_reason": "tool_calls"`),
+	[]byte(`"finish_reason":"length"`), []byte(`"finish_reason": "length"`),
+	[]byte(`"type":"message_stop"`), []byte(`"type": "message_stop"`),
+	[]byte(`"type":"response.completed"`), []byte(`"type": "response.completed"`),
 }
 
 func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }

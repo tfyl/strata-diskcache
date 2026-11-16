@@ -198,6 +198,22 @@ func (s *Store) KeepFingerprint(fingerprint string) {
 	}
 }
 
+// AnyFingerprint returns the fingerprint of the most recently used session file on disk, or "".
+func (s *Store) AnyFingerprint() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var best *Entry
+	for _, e := range s.entries {
+		if best == nil || e.Used.After(best.Used) || (e.Used.Equal(best.Used) && e.Name() > best.Name()) {
+			best = e
+		}
+	}
+	if best != nil {
+		return best.Fingerprint
+	}
+	return ""
+}
+
 // Reserve makes room for a file of about need bytes: the least recently used
 // files go until it fits under the cap and leaves MinFree on the disk. False
 // when it cannot fit even with every file of ours gone; then nothing goes.

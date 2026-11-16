@@ -57,6 +57,13 @@ func ErrorKind(err error) string {
 	}
 }
 
+// IsUnloaded reports whether Strata refused a slot call because the engine is unloaded.
+func IsUnloaded(err error) bool {
+	var se *SlotError
+	return errors.As(err, &se) && se.Status == http.StatusServiceUnavailable &&
+		strings.Contains(strings.ToLower(se.Message), "not loaded")
+}
+
 // Save writes the live conversation to name in Strata's slot_save_path and
 // returns the tokens and bytes written. Strata runs it in its request queue,
 // between requests.
@@ -68,6 +75,28 @@ func (c *Client) Save(ctx context.Context, name string) (tokens int, bytes int64
 // without parking it.
 func (c *Client) Restore(ctx context.Context, name string) (tokens int, bytes int64, err error) {
 	return c.slot(ctx, "restore", name)
+}
+
+// Wakeup sends a 1-token request to trigger lazy model loading in Strata.
+func (c *Client) Wakeup(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	body := []byte(`{"messages":[{"role":"user","content":"."}],"max_tokens":1,"stream":false}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return &SlotError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+	}
+	return nil
 }
 
 func (c *Client) slot(ctx context.Context, action, name string) (int, int64, error) {
@@ -184,8 +213,8 @@ func (c *Client) Engine(ctx context.Context) (Engine, error) {
 	if err := c.getJSON(ctx, "/metrics", &m); err != nil {
 		return Engine{}, err
 	}
-	if m.CC.Parked == nil || m.Engine.Model == "" {
-		return Engine{}, errors.New("strata: /metrics has no conversation_cache.parked or engine.model")
+	if m.CC.Parked == nil || m.Engine.Model == "" || m.Engine.Context == nil || m.Engine.KV == nil {
+		return Engine{}, errors.New("strata: engine unloaded or /metrics incomplete")
 	}
 	e := m.Engine
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s|%v|%v|%v|%v", e.Model, e.Version, e.Context, e.KV, e.CVec))

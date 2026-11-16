@@ -147,12 +147,29 @@ func (c *cache) prepare(ctx context.Context, path string, body []byte) (t *ticke
 	// request behind it anyway.
 	c.saveMu.Lock()
 	defer c.saveMu.Unlock()
+	var fp string
 	en, err := c.eng.Engine(ctx)
-	if err != nil {
+	switch {
+	case err == nil:
+		fp = c.learn(en)
+	case !st.Loaded:
+		// An unloaded engine has no /metrics to read a fingerprint from. The last one we
+		// learned, or the newest file on disk, is what a restore has to match; a cold start
+		// with no files has nothing to restore.
+		c.mu.Lock()
+		fp = c.fingerprint
+		c.mu.Unlock()
+		if fp == "" {
+			fp = c.files.AnyFingerprint()
+		}
+		if fp == "" {
+			t.action, t.reason = actMiss, "engine_unloaded_cold"
+			return t
+		}
+	default:
 		t.action, t.reason = actMiss, "engine_"+strata.ErrorKind(err)
 		return t
 	}
-	fp := c.learn(en)
 	inRAM := c.inRAM(keys)
 	var file store.Entry
 	var onDisk bool
@@ -298,8 +315,30 @@ func (c *cache) save(ctx context.Context, fp string, live []string, tokens int, 
 }
 
 func (c *cache) restore(ctx context.Context, e store.Entry, t *ticket) bool {
+	uCtx := context.WithoutCancel(ctx)
 	t0 := time.Now()
-	n, b, err := c.eng.Restore(context.WithoutCancel(ctx), e.Name())
+	n, b, err := c.eng.Restore(uCtx, e.Name())
+	if strata.IsUnloaded(err) {
+		// A --lazy engine loads on the next request: wake it, check it is still the engine
+		// the file was written for, and give it the restore it refused.
+		c.log.Info("waking engine for restore", "tokens", e.Tokens)
+		if err = c.eng.Wakeup(uCtx); err == nil {
+			en, eerr := c.eng.Engine(uCtx)
+			if eerr != nil {
+				err = eerr
+			} else {
+				switch fp := c.learn(en); {
+				case fp != e.Fingerprint:
+					c.log.Warn("woken into another engine; reading fresh", "wanted", e.Fingerprint, "got", fp)
+					c.m.failures.WithLabelValues("restore", "fingerprint").Inc()
+					return false
+				default:
+					t0 = time.Now()
+					n, b, err = c.eng.Restore(uCtx, e.Name())
+				}
+			}
+		}
+	}
 	d := time.Since(t0)
 	if err != nil {
 		kind := strata.ErrorKind(err)
@@ -310,7 +349,14 @@ func (c *cache) restore(ctx context.Context, e store.Entry, t *ticket) bool {
 		}
 		return false
 	}
-	c.files.Touch(e)
+	if n < e.Tokens/2 {
+		// The file on disk restored far less than its name claims: a save cut short. Keep it
+		// and every later turn finds it "covered" and is never saved.
+		c.log.Warn("truncated session file; forgetting", "expected", e.Tokens, "actual", n)
+		c.files.Forget(e, "truncated")
+	} else {
+		c.files.Touch(e)
+	}
 	c.m.restored(b, d)
 	t.tokens = n
 	c.log.Info("restore", "tokens", n, "mb", b>>20, "ms", d.Milliseconds())
